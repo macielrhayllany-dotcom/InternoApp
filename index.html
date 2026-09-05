@@ -1364,17 +1364,9 @@
 //  ① CONFIGURACIÓN — editá solo esta sección
 // ══════════════════════════════════════════════════════════
 
-const MP_LINK = 'https://mpago.la/2wS4woy'; // ← tu link de MercadoPago
-
-const VALID_CODES = [
-  'MEDCARDS2026',
-  'Qx-001',
-  'Qx-002',
-  'Qx-003',
-  'Qx-004',
-  'Qx-005',
-  // Agregá más códigos acá
-];
+// El link de pago y los códigos ahora se manejan 100% desde el backend
+// (netlify/functions/crear-preferencia.js y validar-codigo.js). No hace
+// falta configurar nada acá.
 
 // ══════════════════════════════════════════════════════════
 //  ② DECKS — agregá tu contenido acá
@@ -5070,6 +5062,7 @@ function closeSectionPickerAndStart(section) {
 
 /* Iniciar solo las cards de una sección */
 function startDeckSection(deckId, section, origenMenuId) {
+  if (!hasPaidAccess) { showLock(); return; }
   const deck = allDecks[deckId];
   const filtered = deck.cards.filter(c => c.section === section);
   if (filtered.length === 0) { alert('Sin tarjetas en esta sección.'); return; }
@@ -5295,27 +5288,139 @@ function showLogin() {
   document.getElementById('accessCodeInput').focus();
 }
 
-function irAPagar() {
+async function irAPagar() {
   const btn = document.getElementById('mpBtnText');
   btn.textContent = 'Redirigiendo...';
-  setTimeout(() => { window.open(MP_LINK, '_blank'); btn.textContent = 'Pagar con MercadoPago →'; }, 500);
+  try {
+    const resp = await fetch('/api/crear-preferencia', { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok && data.checkoutUrl) {
+      window.location.href = data.checkoutUrl;
+    } else {
+      btn.textContent = 'Pagar con MercadoPago →';
+      alert('No pudimos iniciar el pago. Probá de nuevo en unos segundos.');
+    }
+  } catch {
+    btn.textContent = 'Pagar con MercadoPago →';
+    alert('Error de conexión. Probá de nuevo.');
+  }
 }
 
-function checkAccess() {
-  const input = document.getElementById('accessCodeInput').value.trim().toUpperCase();
-  if (VALID_CODES.map(c => c.toUpperCase()).includes(input)) {
-    document.getElementById('lockOverlay').style.display  = 'none';
-    document.getElementById('accessGranted').style.display = 'flex';
-  } else {
-    document.getElementById('accessError').style.display = 'block';
-    const inp = document.getElementById('accessCodeInput');
-    inp.style.borderColor = '#C0392B';
-    setTimeout(() => { inp.style.borderColor = ''; }, 2000);
+let pendingExpiresAt = null;
+
+function getDeviceId() {
+  let id = localStorage.getItem('mc_device_id');
+  if (!id) {
+    id = (crypto.randomUUID ? crypto.randomUUID() : 'dev-' + Math.random().toString(36).slice(2) + Date.now());
+    try { localStorage.setItem('mc_device_id', id); } catch {}
   }
+  return id;
+}
+
+function showAccessError(reason) {
+  const mensajes = {
+    invalid: 'Código inválido. Revisá que esté bien escrito.',
+    expired: 'Este código venció. Comprá un nuevo acceso.',
+    limit: 'Este código ya alcanzó el máximo de dispositivos permitidos.',
+    network: 'No pudimos conectar con el servidor. Probá de nuevo.',
+    bad_request: 'Recargá la página e intentá de nuevo.'
+  };
+  const errorEl = document.getElementById('accessError');
+  errorEl.textContent = mensajes[reason] || 'No pudimos validar el código.';
+  errorEl.style.display = 'block';
+  const inp = document.getElementById('accessCodeInput');
+  inp.style.borderColor = '#C0392B';
+  setTimeout(() => { inp.style.borderColor = ''; }, 2000);
+}
+
+async function checkAccess() {
+  const input = document.getElementById('accessCodeInput').value.trim().toUpperCase();
+  document.getElementById('accessError').style.display = 'none';
+  if (!input) return;
+
+  try {
+    const resp = await fetch('/api/validar-codigo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: input, deviceId: getDeviceId() })
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      pendingExpiresAt = data.expiresAt || null;
+      document.getElementById('lockOverlay').style.display  = 'none';
+      document.getElementById('accessGranted').style.display = 'flex';
+    } else {
+      showAccessError(data.reason);
+    }
+  } catch {
+    showAccessError('network');
+  }
+}
+
+// Clave de acceso en localStorage: { expires: timestamp }
+const MC_ACCESS_KEY = 'mc_access';
+const MC_ACCESS_DAYS = 30;
+
+function saveAccessLocal(expiresAt) {
+  try {
+    localStorage.setItem(MC_ACCESS_KEY, JSON.stringify({
+      expires: expiresAt || (Date.now() + MC_ACCESS_DAYS * 24 * 60 * 60 * 1000)
+    }));
+  } catch {}
+}
+
+function loadAccessLocal() {
+  try {
+    const raw = localStorage.getItem(MC_ACCESS_KEY);
+    if (!raw) return false;
+    const data = JSON.parse(raw);
+    return data.expires && data.expires > Date.now();
+  } catch { return false; }
+}
+
+// Al cargar la página, restaurar acceso si sigue vigente
+document.addEventListener('DOMContentLoaded', () => {
+  if (loadAccessLocal()) {
+    hasPaidAccess = true;
+  }
+});
+
+// Si volvemos de MercadoPago con un pago aprobado, esperamos que el webhook
+// genere el código y lo autocompletamos.
+document.addEventListener('DOMContentLoaded', () => {
+  const params = new URLSearchParams(window.location.search);
+  const paymentId = params.get('payment_id');
+  const status = params.get('status') || params.get('collection_status');
+  if (paymentId && status === 'approved') {
+    esperarCodigoDePago(paymentId);
+  }
+});
+
+async function esperarCodigoDePago(paymentId, intentos = 8) {
+  showLockConMensaje('Confirmando tu pago, un momento…');
+  for (let i = 0; i < intentos; i++) {
+    try {
+      const resp = await fetch(`/api/obtener-codigo?payment_id=${encodeURIComponent(paymentId)}`);
+      const data = await resp.json();
+      if (data.ok && data.code) {
+        document.getElementById('accessCodeInput').value = data.code;
+        checkAccess();
+        return;
+      }
+    } catch {}
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  // Si tardó demasiado, dejamos el modal abierto para que el usuario reintente
+  showAccessError('bad_request');
+}
+
+function showLockConMensaje() {
+  document.getElementById('lockOverlay').style.display = 'flex';
 }
 
 function grantFullAccess() {
   hasPaidAccess = true;
+  saveAccessLocal(pendingExpiresAt);
   document.getElementById('accessGranted').style.display = 'none';
   document.querySelectorAll('.deck-card').forEach(card => {
     if (card.getAttribute('onclick') === 'showLock()') {
@@ -5432,6 +5537,7 @@ function retryFailed() {
 
 // startDeck con reset de estado de sesión
 function startDeck(deckId, origenMenuId, limite) {
+  if (!hasPaidAccess && deckId !== '__falladas__') { showLock(); return; }
   const deck = allDecks[deckId];
   if (!deck || !deck.cards || deck.cards.length === 0) {
     alert('Este deck todavía no tiene tarjetas.'); return;
