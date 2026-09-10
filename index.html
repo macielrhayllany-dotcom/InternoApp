@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>InternoApp — Flashcards de Clínica Quirúrgica</title>
+<title>MedCards — Flashcards de las Clínicas</title>
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;900&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
   :root {
@@ -799,7 +799,7 @@
 ══════════════════════════════════════ -->
 <div id="landing">
   <header>
-    <div class="logo">Interno<span>App</span></div>
+    <div class="logo">Med<span>Cards</span></div>
     <button class="nav-btn" onclick="showLogin()">Ya tengo acceso</button>
   </header>
 
@@ -1259,6 +1259,7 @@
     <button class="back-btn" onclick="goBack()">← Volver</button>
     <div class="logo">Med<span>Cards</span></div>
     <div class="progress-info">Tarjeta <strong id="cardNum">1</strong> de <strong id="cardTotal">—</strong></div>
+    <div id="trialBadge" style="display:none;font-size:11px;letter-spacing:1px;text-transform:uppercase;background:var(--red-light);color:var(--red);padding:5px 10px;">Prueba gratis</div>
   </div>
 
   <div class="app-content">
@@ -1314,8 +1315,8 @@
 <div class="lock-overlay" id="lockOverlay">
   <div class="lock-box">
     <div class="lock-icon">🔐</div>
-    <div class="lock-title">Acceso completo</div>
-    <div class="lock-desc">Desbloqueá todos los flashcards con un único pago. Sin suscripción, tuyo para siempre.</div>
+    <div class="lock-title" id="lockTitle">Acceso completo</div>
+    <div class="lock-desc" id="lockDesc">Desbloqueá todos los flashcards con un único pago. Sin suscripción, tuyo para siempre.</div>
     <div class="lock-price">$15.000 ARS</div>
     <div class="lock-price-note">Pago único · Acceso de por vida · Aceptamos todas las tarjetas</div>
     <button class="buy-btn" onclick="irAPagar()">
@@ -5062,11 +5063,12 @@ function closeSectionPickerAndStart(section) {
 
 /* Iniciar solo las cards de una sección */
 function startDeckSection(deckId, section, origenMenuId) {
-  if (!hasPaidAccess) { showLock(); return; }
+  freeLimitHit = false;
   const deck = allDecks[deckId];
   const filtered = deck.cards.filter(c => c.section === section);
   if (filtered.length === 0) { alert('Sin tarjetas en esta sección.'); return; }
 
+  currentDeckId = deckId;
   menuAnterior = origenMenuId || null;
   if (menuAnterior) {
     document.getElementById(menuAnterior).style.display = 'none';
@@ -5141,6 +5143,10 @@ let isFlipped     = false;
 let menuAnterior  = null;
 let hasPaidAccess = false;
 let currentDeckId = null;
+
+// ── Prueba gratis: cantidad de tarjetas que puede ver cualquiera sin pagar ──
+const FREE_CARDS_LIMIT = 5;
+let freeLimitHit = false; // true cuando el usuario está frenado en el paywall a mitad de deck
 
 /* Navegación de menús */
 /* Secciones principales del landing */
@@ -5217,6 +5223,14 @@ function startDeckTodos(decksObj, nombre, badge, origenMenuId, limite) {
 
 /* Cargar tarjeta actual */
 function loadCard() {
+  if (!hasPaidAccess && currentDeckId !== '__falladas__' && currentIndex >= FREE_CARDS_LIMIT) {
+    freeLimitHit = true;
+    showLock(
+      'Llegaste al límite de la prueba gratis',
+      `Viste ${FREE_CARDS_LIMIT} tarjetas gratis de este deck. Desbloqueá el acceso completo para seguir estudiando sin límites — y retomás justo donde te quedaste.`
+    );
+    return;
+  }
   const card   = currentDeck.cards[currentIndex];
   const total  = currentDeck.cards.length;
   const numStr = String(currentIndex + 1).padStart(2, '0');
@@ -5228,6 +5242,7 @@ function loadCard() {
   document.getElementById('cardNumBig').textContent   = numStr;
   document.getElementById('cardNumBack').textContent  = numStr;
   document.getElementById('progressFill').style.width = ((currentIndex + 1) / total * 100) + '%';
+  document.getElementById('trialBadge').style.display = (!hasPaidAccess && currentDeckId !== '__falladas__') ? 'block' : 'none';
 
   isFlipped = false;
   const inner = document.getElementById('cardInner');
@@ -5273,14 +5288,22 @@ function goBack() {
 }
 
 /* Acceso / Pago */
-function showLock() {
+function showLock(customTitle, customDesc) {
   if (hasPaidAccess) return;
+  document.getElementById('lockTitle').textContent = customTitle || 'Acceso completo';
+  document.getElementById('lockDesc').textContent = customDesc || 'Desbloqueá todos los flashcards con un único pago. Sin suscripción, tuyo para siempre.';
   document.getElementById('lockOverlay').style.display = 'flex';
 }
 
 function closeLock() {
   document.getElementById('lockOverlay').style.display = 'none';
   document.getElementById('accessError').style.display = 'none';
+  // Si cerró el paywall que apareció a mitad de deck (límite gratis), lo mandamos
+  // de vuelta al menú en vez de dejarlo "colgado" en la última tarjeta gratis.
+  if (freeLimitHit) {
+    freeLimitHit = false;
+    goBack();
+  }
 }
 
 function showLogin() {
@@ -5430,6 +5453,14 @@ function grantFullAccess() {
       if (count) count.style.color = '#2E7D32';
     }
   });
+  // Si compró justo al toparse con el límite de la prueba gratis, seguimos
+  // el deck en la misma tarjeta donde se había frenado.
+  if (freeLimitHit) {
+    freeLimitHit = false;
+    if (currentDeck && document.getElementById('app').style.display === 'block') {
+      loadCard();
+    }
+  }
 }
 
 /* ══════════════════════════════════════
@@ -5537,7 +5568,7 @@ function retryFailed() {
 
 // startDeck con reset de estado de sesión
 function startDeck(deckId, origenMenuId, limite) {
-  if (!hasPaidAccess && deckId !== '__falladas__') { showLock(); return; }
+  freeLimitHit = false;
   const deck = allDecks[deckId];
   if (!deck || !deck.cards || deck.cards.length === 0) {
     alert('Este deck todavía no tiene tarjetas.'); return;
